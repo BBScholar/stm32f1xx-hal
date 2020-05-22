@@ -160,13 +160,20 @@ impl Frame {
         frame
     }
 
+    /// Returns the frame identifier.
+    fn id(&self) -> Id {
+        self.id
+    }
+}
+
+impl crate::hal::can::Frame for Frame {
     /// Creates a new frame with a standard identifier.
-    pub fn new_standard(id: u32, data: &[u8]) -> Self {
+    fn new_standard(id: u32, data: &[u8]) -> Self {
         Self::new(Id::new_standard(id), data)
     }
 
     /// Creates a new frame with an extended identifier.
-    pub fn new_extended(id: u32, data: &[u8]) -> Self {
+    fn new_extended(id: u32, data: &[u8]) -> Self {
         Self::new(Id::new_extended(id), data)
     }
 
@@ -174,47 +181,47 @@ impl Frame {
     ///
     /// Remote frames do not contain any data, even if the frame was created with a
     /// non-empty data buffer.
-    pub fn with_rtr(&mut self, dlc: usize) -> &mut Self {
+    fn with_rtr(&mut self, dlc: usize) -> &mut Self {
         self.id = self.id.with_rtr(true);
         self.dlc = dlc;
         self
     }
 
     /// Returns true if this frame is an extended frame
-    pub fn is_extended(&self) -> bool {
+    fn is_extended(&self) -> bool {
         self.id.is_extended()
     }
 
     /// Returns true if this frame is a standard frame
-    pub fn is_standard(&self) -> bool {
+    fn is_standard(&self) -> bool {
         self.id.is_standard()
     }
 
     /// Returns true if this frame is a remote frame
-    pub fn is_remote_frame(&self) -> bool {
+    fn is_remote_frame(&self) -> bool {
         self.id.rtr()
     }
 
     /// Returns true if this frame is a data frame
-    pub fn is_data_frame(&self) -> bool {
+    fn is_data_frame(&self) -> bool {
         !self.is_remote_frame()
     }
 
     /// Returns the frame identifier.
-    pub fn id(&self) -> Id {
-        self.id
+    fn id(&self) -> u32 {
+        self.id.as_u32()
     }
 
     /// Returns the data length code (DLC) which is in the range 0..8.
     ///
     /// For data frames the DLC value always matches the lenght of the data.
     /// Remote frames no not carry any data, yet the DLC can be greater than 0.
-    pub fn dlc(&self) -> usize {
+    fn dlc(&self) -> usize {
         self.dlc
     }
 
     /// Returns the frame data (0..8 bytes in length).
-    pub fn data(&self) -> &[u8] {
+    fn data(&self) -> &[u8] {
         if self.is_data_frame() {
             &self.data[0..self.dlc]
         } else {
@@ -808,52 +815,6 @@ impl<Instance> Tx<Instance>
 where
     Instance: traits::Instance,
 {
-    /// Puts a CAN frame in a free transmit mailbox for transmission on the bus.
-    ///
-    /// Frames are transmitted to the bus based on their priority (identifier).
-    /// Transmit order is preserved for frames with of identifiers.
-    /// If all transmit mailboxes are full, a higher priority frame replaces the
-    /// lowest priority frame, which is returned as `Ok(Some(frame))`.
-    pub fn transmit(&mut self, frame: &Frame) -> nb::Result<Option<Frame>, Infallible> {
-        let can = unsafe { &*Instance::REGISTERS };
-
-        // Get the index of the next free mailbox or the one with the lowest priority.
-        let tsr = can.tsr.read();
-        let idx = tsr.code().bits() as usize;
-
-        let frame_is_pending =
-            tsr.tme0().bit_is_clear() || tsr.tme1().bit_is_clear() || tsr.tme2().bit_is_clear();
-        let pending_frame = if frame_is_pending {
-            // High priority frames are transmitted first by the mailbox system.
-            // Frames with identical identifier shall be transmitted in FIFO order.
-            // The controller schedules pending frames of same priority based on the
-            // mailbox index instead. As a workaround check all pending mailboxes
-            // and only accept higher priority frames.
-            self.check_priority(0, frame.id)?;
-            self.check_priority(1, frame.id)?;
-            self.check_priority(2, frame.id)?;
-
-            let all_frames_are_pending =
-                tsr.tme0().bit_is_clear() && tsr.tme1().bit_is_clear() && tsr.tme2().bit_is_clear();
-            if all_frames_are_pending {
-                // No free mailbox is available. This can only happen when three frames with
-                // descending priority were requested for transmission and all of them are
-                // blocked by bus traffic with even higher priority.
-                // To prevent a priority inversion abort and replace the lowest priority frame.
-                self.read_pending_mailbox(idx)
-            } else {
-                // There was a free mailbox.
-                None
-            }
-        } else {
-            // All mailboxes are available: Send frame without performing any checks.
-            None
-        };
-
-        self.write_mailbox(idx, frame);
-        Ok(pending_frame)
-    }
-
     /// Returns `Ok` when the mailbox is free or has a lower priority than
     /// identifier than `id`.
     fn check_priority(&self, idx: usize, id: Id) -> nb::Result<(), Infallible> {
@@ -959,6 +920,60 @@ where
     }
 }
 
+impl<Instance> crate::hal::can::Transmitter for Tx<Instance>
+where
+    Instance: traits::Instance,
+{
+    type Frame = Frame;
+    type Error = Infallible;
+
+    /// Puts a CAN frame in a free transmit mailbox for transmission on the bus.
+    ///
+    /// Frames are transmitted to the bus based on their priority (identifier).
+    /// Transmit order is preserved for frames with of identifiers.
+    /// If all transmit mailboxes are full, a higher priority frame replaces the
+    /// lowest priority frame, which is returned as `Ok(Some(frame))`.
+    fn transmit(&mut self, frame: &Frame) -> nb::Result<Option<Frame>, Infallible> {
+        let can = unsafe { &*Instance::REGISTERS };
+
+        // Get the index of the next free mailbox or the one with the lowest priority.
+        let tsr = can.tsr.read();
+        let idx = tsr.code().bits() as usize;
+
+        let frame_is_pending =
+            tsr.tme0().bit_is_clear() || tsr.tme1().bit_is_clear() || tsr.tme2().bit_is_clear();
+        let pending_frame = if frame_is_pending {
+            // High priority frames are transmitted first by the mailbox system.
+            // Frames with identical identifier shall be transmitted in FIFO order.
+            // The controller schedules pending frames of same priority based on the
+            // mailbox index instead. As a workaround check all pending mailboxes
+            // and only accept higher priority frames.
+            self.check_priority(0, frame.id)?;
+            self.check_priority(1, frame.id)?;
+            self.check_priority(2, frame.id)?;
+
+            let all_frames_are_pending =
+                tsr.tme0().bit_is_clear() && tsr.tme1().bit_is_clear() && tsr.tme2().bit_is_clear();
+            if all_frames_are_pending {
+                // No free mailbox is available. This can only happen when three frames with
+                // descending priority were requested for transmission and all of them are
+                // blocked by bus traffic with even higher priority.
+                // To prevent a priority inversion abort and replace the lowest priority frame.
+                self.read_pending_mailbox(idx)
+            } else {
+                // There was a free mailbox.
+                None
+            }
+        } else {
+            // All mailboxes are available: Send frame without performing any checks.
+            None
+        };
+
+        self.write_mailbox(idx, frame);
+        Ok(pending_frame)
+    }
+}
+
 /// Interface to the CAN receiver part.
 pub struct Rx<Instance> {
     _can: PhantomData<Instance>,
@@ -968,16 +983,6 @@ impl<Instance> Rx<Instance>
 where
     Instance: traits::Instance,
 {
-    /// Returns a received frame if available.
-    ///
-    /// Returns `Err` when a frame was lost due to buffer overrun.
-    pub fn receive(&mut self) -> nb::Result<Frame, ()> {
-        match self.receive_fifo(0) {
-            Err(nb::Error::WouldBlock) => self.receive_fifo(1),
-            result => result,
-        }
-    }
-
     fn receive_fifo(&mut self, fifo_nr: usize) -> nb::Result<Frame, ()> {
         let can = unsafe { &*Instance::REGISTERS };
 
@@ -1027,5 +1032,23 @@ where
         let can = unsafe { &*Instance::REGISTERS };
         bb::clear(&can.ier, 1); // FMPIE0
         bb::clear(&can.ier, 4); // FMPIE1
+    }
+}
+
+impl<Instance> crate::hal::can::Receiver for Rx<Instance>
+where
+    Instance: traits::Instance,
+{
+    type Frame = Frame;
+    type Error = ();
+
+    /// Returns a received frame if available.
+    ///
+    /// Returns `Err` when a frame was lost due to buffer overrun.
+    fn receive(&mut self) -> nb::Result<Frame, ()> {
+        match self.receive_fifo(0) {
+            Err(nb::Error::WouldBlock) => self.receive_fifo(1),
+            result => result,
+        }
     }
 }
