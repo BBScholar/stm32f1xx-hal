@@ -28,6 +28,7 @@ use crate::gpio::{
     gpiob::{PB8, PB9},
     Alternate, Floating, Input, PushPull,
 };
+use crate::hal::can::{MaskType, RtrFilterBehavior};
 use crate::pac::CAN1;
 #[cfg(feature = "connectivity")]
 use crate::pac::CAN2;
@@ -360,8 +361,8 @@ where
 /// Interface to the CAN peripheral.
 pub struct Can<Instance> {
     _can: PhantomData<Instance>,
-    tx: Option<Tx<Instance>>,
-    rx: Option<Rx<Instance>>,
+    tx_taken: bool,
+    rx_taken: bool,
 }
 
 impl<Instance> Can<Instance>
@@ -388,8 +389,8 @@ where
 
         Can {
             _can: PhantomData,
-            tx: Some(Tx { _can: PhantomData }),
-            rx: Some(Rx { _can: PhantomData }),
+            tx_taken: false,
+            rx_taken: false,
         }
     }
 
@@ -476,15 +477,28 @@ where
     /// Only the first calls returns a valid transmitter. Subsequent calls
     /// return `None`.
     pub fn take_tx(&mut self) -> Option<Tx<Instance>> {
-        self.tx.take()
+        if self.tx_taken {
+            None
+        } else {
+            self.tx_taken = true;
+            Some(Tx { _can: PhantomData })
+        }
     }
 
     /// Returns the receiver interface.
     ///
     /// Takes ownership of filters which must be otained by `Can::split_filters()`.
     /// Only the first calls returns a valid receiver. Subsequent calls return `None`.
-    pub fn take_rx(&mut self, _filters: Filters<Instance>) -> Option<Rx<Instance>> {
-        self.rx.take()
+    pub fn take_rx(&mut self, filters: Filters<Instance>) -> Option<Rx<Instance>> {
+        if self.rx_taken {
+            None
+        } else {
+            self.rx_taken = true;
+            Some(Rx {
+                filters,
+                _can: PhantomData,
+            })
+        }
     }
 }
 
@@ -598,52 +612,6 @@ pub struct Filter {
 }
 
 impl Filter {
-    /// Creates a filter that accepts all messages.
-    pub fn accept_all() -> Self {
-        Self { id: 0, mask: 0 }
-    }
-
-    /// Creates a filter that accepts frames with the specified standard identifier.
-    pub fn new_standard(id: u32) -> Self {
-        Self {
-            id: id << Id::STANDARD_SHIFT,
-            mask: Id::STANDARD_MASK | Id::IDE_MASK | Id::RTR_MASK,
-        }
-    }
-
-    /// Creates a filter that accepts frames with the extended standard identifier.
-    pub fn new_extended(id: u32) -> Self {
-        Self {
-            id: id << Id::EXTENDED_SHIFT | Id::IDE_MASK,
-            mask: Id::EXTENDED_MASK | Id::IDE_MASK | Id::RTR_MASK,
-        }
-    }
-
-    /// Only look at the bits of the indentifier which are set to 1 in the mask.
-    ///
-    /// A mask of 0 accepts all identifiers.
-    pub fn with_mask(&mut self, mask: u32) -> &mut Self {
-        if self.is_extended() {
-            self.mask = (self.mask & !Id::EXTENDED_MASK) | (mask << Id::EXTENDED_SHIFT);
-        } else {
-            self.mask = (self.mask & !Id::STANDARD_MASK) | (mask << Id::STANDARD_SHIFT);
-        }
-        self
-    }
-
-    /// Makes this filter accept both data and remote frames.
-    pub fn allow_remote(&mut self) -> &mut Self {
-        self.mask &= !Id::RTR_MASK;
-        self
-    }
-
-    /// Makes this filter accept only remote frames.
-    pub fn only_remote(&mut self) -> &mut Self {
-        self.id |= Id::RTR_MASK;
-        self.mask |= Id::RTR_MASK;
-        self
-    }
-
     fn is_extended(&self) -> bool {
         self.id & Id::IDE_MASK != 0
     }
@@ -670,6 +638,129 @@ impl Filter {
     }
 }
 
+impl crate::hal::can::Filter for Filter {
+    /// Creates a filter that accepts all messages.
+    fn accept_all() -> Self {
+        Self { id: 0, mask: 0 }
+    }
+
+    /// Creates a filter that accepts frames with the specified standard identifier.
+    fn new_standard(id: u32) -> Self {
+        Self {
+            id: id << Id::STANDARD_SHIFT,
+            mask: Id::STANDARD_MASK | Id::IDE_MASK | Id::RTR_MASK,
+        }
+    }
+
+    /// Creates a filter that accepts frames with the extended standard identifier.
+    fn new_extended(id: u32) -> Self {
+        Self {
+            id: id << Id::EXTENDED_SHIFT | Id::IDE_MASK,
+            mask: Id::EXTENDED_MASK | Id::IDE_MASK | Id::RTR_MASK,
+        }
+    }
+
+    /// Only look at the bits of the indentifier which are set to 1 in the mask.
+    ///
+    /// A mask of 0 accepts all identifiers.
+    fn with_mask(&mut self, mask: u32) -> &mut Self {
+        if self.is_extended() {
+            self.mask = (self.mask & !Id::EXTENDED_MASK) | (mask << Id::EXTENDED_SHIFT);
+        } else {
+            self.mask = (self.mask & !Id::STANDARD_MASK) | (mask << Id::STANDARD_SHIFT);
+        }
+        self
+    }
+
+    /// Makes this filter accept both data and remote frames.
+    fn allow_remote(&mut self) -> &mut Self {
+        self.mask &= !Id::RTR_MASK;
+        self
+    }
+
+    /// Makes this filter accept only remote frames.
+    fn remote_only(&mut self) -> &mut Self {
+        self.id |= Id::RTR_MASK;
+        self.mask |= Id::RTR_MASK;
+        self
+    }
+}
+
+pub struct FilterGroup {
+    num_filter_banks: usize,
+    mode_list: bool,
+    scale_16bit: bool,
+}
+
+impl crate::hal::can::FilterGroup for FilterGroup {
+    fn num_filters(&self) -> usize {
+        self.num_filter_banks
+            * match (self.mode_list, self.scale_16bit) {
+                (false, false) => 1,
+                (false, true) | (true, false) => 2,
+                (true, true) => 4,
+            }
+    }
+
+    fn extended(&self) -> bool {
+        !self.scale_16bit
+    }
+
+    fn mask(&self) -> Option<MaskType> {
+        if self.mode_list {
+            None
+        } else {
+            Some(MaskType::Individual)
+        }
+    }
+
+    fn rtr(&self) -> RtrFilterBehavior {
+        RtrFilterBehavior::Configurable
+    }
+}
+
+pub struct FilterGroups<Instance> {
+    idx: usize,
+    stop_idx: usize,
+    _can: PhantomData<Instance>,
+}
+
+impl<Instance> Iterator for FilterGroups<Instance>
+where
+    Instance: traits::Instance,
+{
+    type Item = FilterGroup;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let can = unsafe { &*CAN1::ptr() };
+
+        if self.idx >= self.stop_idx {
+            return None;
+        }
+
+        let mut group = FilterGroup {
+            num_filter_banks: 1,
+            mode_list: (can.fm1r.read().bits() & (1 << self.idx)) != 0,
+            scale_16bit: (can.fs1r.read().bits() & (1 << self.idx)) == 0,
+        };
+        self.idx += 1;
+
+        while self.idx < self.stop_idx {
+            let mode_list = (can.fm1r.read().bits() & (1 << self.idx)) != 0;
+            let scale_16bit = (can.fs1r.read().bits() & (1 << self.idx)) == 0;
+
+            if group.mode_list != mode_list || group.scale_16bit != scale_16bit {
+                break;
+            }
+
+            group.num_filter_banks += 1;
+            self.idx += 1;
+        }
+
+        Some(group)
+    }
+}
+
 /// Interface to the filter banks of a CAN peripheral.
 pub struct Filters<Instance> {
     start_idx: usize,
@@ -691,23 +782,12 @@ where
         }
     }
 
-    /// Returns the number of available filters.
-    ///
-    /// This can number can be larger than the number of filter banks if
-    /// `Can::split_filters_advanced()` was used.
-    pub fn num_available(&self) -> usize {
-        let can = unsafe { &*CAN1::ptr() };
-
-        let mut filter_count = self.stop_idx - self.start_idx;
-
-        let owned_bits = ((1 << filter_count) - 1) << self.start_idx;
-        let mode_list = can.fm1r.read().bits() & owned_bits;
-        let scale_16bit = !can.fs1r.read().bits() & owned_bits;
-
-        filter_count += mode_list.count_ones() as usize;
-        filter_count += scale_16bit.count_ones() as usize;
-        filter_count += (mode_list & scale_16bit).count_ones() as usize;
-        filter_count
+    pub fn groups(&self) -> FilterGroups<Instance> {
+        FilterGroups {
+            idx: self.start_idx,
+            stop_idx: self.stop_idx,
+            _can: PhantomData,
+        }
     }
 
     /// Adds a filter. Returns `Err` if the maximum number of filters was reached.
@@ -976,6 +1056,7 @@ where
 
 /// Interface to the CAN receiver part.
 pub struct Rx<Instance> {
+    filters: Filters<Instance>,
     _can: PhantomData<Instance>,
 }
 
@@ -1050,5 +1131,26 @@ where
             Err(nb::Error::WouldBlock) => self.receive_fifo(1),
             result => result,
         }
+    }
+}
+
+impl<Instance> crate::hal::can::FilteredReceiver for Rx<Instance>
+where
+    Instance: traits::Instance,
+{
+    type Filter = Filter;
+    type FilterGroup = FilterGroup;
+    type FilterGroups = FilterGroups<Instance>;
+
+    fn filter_groups(&self) -> FilterGroups<Instance> {
+        self.filters.groups()
+    }
+
+    fn add_filter(&mut self, filter: &Self::Filter) -> Result<(), ()> {
+        self.filters.add(filter)
+    }
+
+    fn clear_filters(&mut self) {
+        self.filters.clear()
     }
 }
