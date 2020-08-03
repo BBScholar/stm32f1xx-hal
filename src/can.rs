@@ -169,13 +169,21 @@ impl Frame {
 
 impl crate::hal::can::Frame for Frame {
     /// Creates a new frame with a standard identifier.
-    fn new_standard(id: u32, data: &[u8]) -> Self {
-        Self::new(Id::new_standard(id), data)
+    fn new_standard(id: u32, data: &[u8]) -> Result<Self, ()> {
+        if id > 0x7FF || data.len() > 8 {
+            return Err(());
+        }
+
+        Ok(Self::new(Id::new_standard(id), data))
     }
 
     /// Creates a new frame with an extended identifier.
-    fn new_extended(id: u32, data: &[u8]) -> Self {
-        Self::new(Id::new_extended(id), data)
+    fn new_extended(id: u32, data: &[u8]) -> Result<Self, ()> {
+        if id > 0x1FFF_FFFF || data.len() > 8 {
+            return Err(());
+        }
+
+        Ok(Self::new(Id::new_extended(id), data))
     }
 
     /// Marks the frame as a remote frame with configurable data length code (DLC).

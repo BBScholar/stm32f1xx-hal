@@ -103,7 +103,7 @@ fn main() -> ! {
 
     // Some messages shall pass the filters.
     for &id in &[0, 1, 2, 4, 5, 8, 9, 10, 11] {
-        let frame_tx = Frame::new_standard(id, &[id as u8]);
+        let frame_tx = Frame::new_standard(id, &[id as u8]).unwrap();
         block!(tx.transmit(&frame_tx)).unwrap();
         let frame_rx = block!(rx.receive()).unwrap();
         assert_eq!(frame_tx, frame_rx);
@@ -111,7 +111,7 @@ fn main() -> ! {
 
     // Others must be filtered out.
     for &id in &[3, 6, 7, 12] {
-        let frame_tx = Frame::new_standard(id, &[id as u8]);
+        let frame_tx = Frame::new_standard(id, &[id as u8]).unwrap();
         block!(tx.transmit(&frame_tx)).unwrap();
         assert!(rx.receive().is_err());
     }
