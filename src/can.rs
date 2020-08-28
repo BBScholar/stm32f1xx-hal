@@ -480,6 +480,24 @@ where
         can.msr.write(|w| w.wkui().set_bit());
     }
 
+    /// Returns a embedded-hal compatilbe interface.
+    ///
+    /// Takes ownership of filters which must be otained by `Can::split_filters()`.
+    /// Only the first calls returns a valid receiver. Subsequent calls return `None`.
+    pub fn as_hal(&mut self, filters: Filters<Instance>) -> Option<CanHal<Instance>> {
+        if self.tx_taken || self.rx_taken {
+            None
+        } else {
+            Some(CanHal {
+                tx: Tx { _can: PhantomData },
+                rx: Rx {
+                    filters,
+                    _can: PhantomData,
+                },
+            })
+        }
+    }
+
     /// Returns the transmitter interface.
     ///
     /// Only the first calls returns a valid transmitter. Subsequent calls
@@ -903,6 +921,52 @@ impl<Instance> Tx<Instance>
 where
     Instance: traits::Instance,
 {
+    /// Puts a CAN frame in a free transmit mailbox for transmission on the bus.
+    ///
+    /// Frames are transmitted to the bus based on their priority (identifier).
+    /// Transmit order is preserved for frames with of identifiers.
+    /// If all transmit mailboxes are full, a higher priority frame replaces the
+    /// lowest priority frame, which is returned as `Ok(Some(frame))`.
+    pub fn transmit(&mut self, frame: &Frame) -> nb::Result<Option<Frame>, Infallible> {
+        let can = unsafe { &*Instance::REGISTERS };
+
+        // Get the index of the next free mailbox or the one with the lowest priority.
+        let tsr = can.tsr.read();
+        let idx = tsr.code().bits() as usize;
+
+        let frame_is_pending =
+            tsr.tme0().bit_is_clear() || tsr.tme1().bit_is_clear() || tsr.tme2().bit_is_clear();
+        let pending_frame = if frame_is_pending {
+            // High priority frames are transmitted first by the mailbox system.
+            // Frames with identical identifier shall be transmitted in FIFO order.
+            // The controller schedules pending frames of same priority based on the
+            // mailbox index instead. As a workaround check all pending mailboxes
+            // and only accept higher priority frames.
+            self.check_priority(0, frame.id)?;
+            self.check_priority(1, frame.id)?;
+            self.check_priority(2, frame.id)?;
+
+            let all_frames_are_pending =
+                tsr.tme0().bit_is_clear() && tsr.tme1().bit_is_clear() && tsr.tme2().bit_is_clear();
+            if all_frames_are_pending {
+                // No free mailbox is available. This can only happen when three frames with
+                // descending priority were requested for transmission and all of them are
+                // blocked by bus traffic with even higher priority.
+                // To prevent a priority inversion abort and replace the lowest priority frame.
+                self.read_pending_mailbox(idx)
+            } else {
+                // There was a free mailbox.
+                None
+            }
+        } else {
+            // All mailboxes are available: Send frame without performing any checks.
+            None
+        };
+
+        self.write_mailbox(idx, frame);
+        Ok(pending_frame)
+    }
+
     /// Returns `Ok` when the mailbox is free or has a lower priority than
     /// identifier than `id`.
     fn check_priority(&self, idx: usize, id: Id) -> nb::Result<(), Infallible> {
@@ -1008,60 +1072,6 @@ where
     }
 }
 
-impl<Instance> crate::hal::can::Transmitter for Tx<Instance>
-where
-    Instance: traits::Instance,
-{
-    type Frame = Frame;
-    type Error = Infallible;
-
-    /// Puts a CAN frame in a free transmit mailbox for transmission on the bus.
-    ///
-    /// Frames are transmitted to the bus based on their priority (identifier).
-    /// Transmit order is preserved for frames with of identifiers.
-    /// If all transmit mailboxes are full, a higher priority frame replaces the
-    /// lowest priority frame, which is returned as `Ok(Some(frame))`.
-    fn transmit(&mut self, frame: &Frame) -> nb::Result<Option<Frame>, Infallible> {
-        let can = unsafe { &*Instance::REGISTERS };
-
-        // Get the index of the next free mailbox or the one with the lowest priority.
-        let tsr = can.tsr.read();
-        let idx = tsr.code().bits() as usize;
-
-        let frame_is_pending =
-            tsr.tme0().bit_is_clear() || tsr.tme1().bit_is_clear() || tsr.tme2().bit_is_clear();
-        let pending_frame = if frame_is_pending {
-            // High priority frames are transmitted first by the mailbox system.
-            // Frames with identical identifier shall be transmitted in FIFO order.
-            // The controller schedules pending frames of same priority based on the
-            // mailbox index instead. As a workaround check all pending mailboxes
-            // and only accept higher priority frames.
-            self.check_priority(0, frame.id)?;
-            self.check_priority(1, frame.id)?;
-            self.check_priority(2, frame.id)?;
-
-            let all_frames_are_pending =
-                tsr.tme0().bit_is_clear() && tsr.tme1().bit_is_clear() && tsr.tme2().bit_is_clear();
-            if all_frames_are_pending {
-                // No free mailbox is available. This can only happen when three frames with
-                // descending priority were requested for transmission and all of them are
-                // blocked by bus traffic with even higher priority.
-                // To prevent a priority inversion abort and replace the lowest priority frame.
-                self.read_pending_mailbox(idx)
-            } else {
-                // There was a free mailbox.
-                None
-            }
-        } else {
-            // All mailboxes are available: Send frame without performing any checks.
-            None
-        };
-
-        self.write_mailbox(idx, frame);
-        Ok(pending_frame)
-    }
-}
-
 /// Interface to the CAN receiver part.
 pub struct Rx<Instance> {
     filters: Filters<Instance>,
@@ -1072,6 +1082,16 @@ impl<Instance> Rx<Instance>
 where
     Instance: traits::Instance,
 {
+    /// Returns a received frame if available.
+    ///
+    /// Returns `Err` when a frame was lost due to buffer overrun.
+    fn receive(&mut self) -> nb::Result<Frame, ()> {
+        match self.receive_fifo(0) {
+            Err(nb::Error::WouldBlock) => self.receive_fifo(1),
+            result => result,
+        }
+    }
+
     fn receive_fifo(&mut self, fifo_nr: usize) -> nb::Result<Frame, ()> {
         let can = unsafe { &*Instance::REGISTERS };
 
@@ -1124,25 +1144,28 @@ where
     }
 }
 
-impl<Instance> crate::hal::can::Receiver for Rx<Instance>
+pub struct CanHal<Instance> {
+    tx: Tx<Instance>,
+    rx: Rx<Instance>,
+}
+
+impl<Instance> crate::hal::can::Can for CanHal<Instance>
 where
     Instance: traits::Instance,
 {
     type Frame = Frame;
     type Error = ();
 
-    /// Returns a received frame if available.
-    ///
-    /// Returns `Err` when a frame was lost due to buffer overrun.
-    fn receive(&mut self) -> nb::Result<Frame, ()> {
-        match self.receive_fifo(0) {
-            Err(nb::Error::WouldBlock) => self.receive_fifo(1),
-            result => result,
+    fn transmit(&mut self, frame: &Frame) -> nb::Result<Option<Frame>, ()> {
+        self.tx.transmit(frame).map_err(|_| nb::Error::Other(()))
         }
+
+    fn receive(&mut self) -> nb::Result<Frame, ()> {
+        self.rx.receive()
     }
 }
 
-impl<Instance> crate::hal::can::FilteredReceiver for Rx<Instance>
+impl<Instance> crate::hal::can::FilteredReceiver for CanHal<Instance>
 where
     Instance: traits::Instance,
 {
@@ -1151,14 +1174,14 @@ where
     type FilterGroups = FilterGroups<Instance>;
 
     fn filter_groups(&self) -> FilterGroups<Instance> {
-        self.filters.groups()
+        self.rx.filters.groups()
     }
 
     fn add_filter(&mut self, filter: &Self::Filter) -> Result<(), ()> {
-        self.filters.add(filter)
+        self.rx.filters.add(filter)
     }
 
     fn clear_filters(&mut self) {
-        self.filters.clear()
+        self.rx.filters.clear()
     }
 }
