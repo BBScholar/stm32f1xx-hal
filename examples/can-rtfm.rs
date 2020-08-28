@@ -23,7 +23,7 @@ use heapless::{
 use panic_halt as _;
 use rtfm::app;
 use stm32f1xx_hal::{
-    can::{Can, Filter, Frame, Id, Rx, Tx},
+    can::{Can, Filter, Frame, Rx, Tx, Id},
     pac::{Interrupt, CAN2},
     prelude::*,
 };
@@ -35,7 +35,7 @@ pool!(
 
 fn alloc_frame(id: Id, data: &[u8]) -> Box<CanFramePool, Init> {
     let frame_box = CanFramePool::alloc().unwrap();
-    frame_box.init(Frame::new(id, data))
+    frame_box.init(Frame::new(id, data).unwrap())
 }
 
 #[app(device = stm32f1xx_hal::pac, peripherals = true)]
@@ -89,10 +89,10 @@ const APP: () = {
         // for extended messages. Accept all IDs by setting the mask to 0. Explicitly
         // allow to receive remote frames.
         filters
-            .add(&Filter::new_standard(0).with_mask(0).allow_remote())
+            .add(&Filter::new(Id::Standard(0)).with_mask(0).allow_remote())
             .unwrap();
         filters
-            .add(&Filter::new_extended(0).with_mask(0).allow_remote())
+            .add(&Filter::new(Id::Extended(0)).with_mask(0).allow_remote())
             .unwrap();
 
         let mut can_rx = can2.take_rx(filters).unwrap();
@@ -122,25 +122,25 @@ const APP: () = {
         // Enqueue some messages. Higher ID means lower priority.
         tx_queue.lock(|tx_queue| {
             tx_queue
-                .push(alloc_frame(Id::new_standard(9), &[0, 1, 2, 4]))
+                .push(alloc_frame(Id::Standard(9), &[0, 1, 2, 4]))
                 .unwrap();
             tx_queue
-                .push(alloc_frame(Id::new_standard(9), &[0, 1, 2, 4]))
+                .push(alloc_frame(Id::Standard(9), &[0, 1, 2, 4]))
                 .unwrap();
             tx_queue
-                .push(alloc_frame(Id::new_standard(8), &[0, 1, 2, 4]))
+                .push(alloc_frame(Id::Standard(8), &[0, 1, 2, 4]))
                 .unwrap();
 
             // Extended frames have lower priority than standard frames.
             tx_queue
-                .push(alloc_frame(Id::new_extended(8), &[0, 1, 2, 4]))
+                .push(alloc_frame(Id::Extended(8), &[0, 1, 2, 4]))
                 .unwrap();
             tx_queue
-                .push(alloc_frame(Id::new_extended(7), &[0, 1, 2, 4]))
+                .push(alloc_frame(Id::Extended(7), &[0, 1, 2, 4]))
                 .unwrap();
 
             tx_queue
-                .push(alloc_frame(Id::new_standard(7), &[0, 1, 2, 4]))
+                .push(alloc_frame(Id::Standard(7), &[0, 1, 2, 4]))
                 .unwrap();
         });
 
@@ -154,13 +154,13 @@ const APP: () = {
             if tx_count >= 3 {
                 tx_queue.lock(|tx_queue| {
                     tx_queue
-                        .push(alloc_frame(Id::new_standard(3), &[0, 1, 2, 4]))
+                        .push(alloc_frame(Id::Standard(3), &[0, 1, 2, 4]))
                         .unwrap();
                     tx_queue
-                        .push(alloc_frame(Id::new_standard(2), &[0, 1, 2, 4]))
+                        .push(alloc_frame(Id::Standard(2), &[0, 1, 2, 4]))
                         .unwrap();
                     tx_queue
-                        .push(alloc_frame(Id::new_standard(1), &[0, 1, 2, 4]))
+                        .push(alloc_frame(Id::Standard(1), &[0, 1, 2, 4]))
                         .unwrap();
                 });
                 break;

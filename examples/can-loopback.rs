@@ -10,7 +10,7 @@ use cortex_m_rt::entry;
 use embedded_hal::digital::v2::OutputPin;
 use nb::block;
 use stm32f1xx_hal::{
-    can::{Can, Filter, Frame},
+    can::{Can, Filter, Frame, Id},
     pac,
     prelude::*,
 };
@@ -63,10 +63,10 @@ fn main() -> ! {
     assert!(!filter_group.extended());
     assert!(filter_group.mask().is_some());
     filters
-        .add(&Filter::new_standard(0).with_mask(!0b1))
+        .add(&Filter::new(Id::Standard(0)).with_mask(!0b1))
         .unwrap();
     filters
-        .add(&Filter::new_standard(0).with_mask(!0b10))
+        .add(&Filter::new(Id::Standard(0)).with_mask(!0b10))
         .unwrap();
 
     // 2x 29bit id filter bank: Matches 4, 5
@@ -74,18 +74,18 @@ fn main() -> ! {
     assert_eq!(filter_group.num_filters(), 2);
     assert!(filter_group.extended());
     assert!(filter_group.mask().is_none());
-    filters.add(&Filter::new_standard(4)).unwrap();
-    filters.add(&Filter::new_standard(5)).unwrap();
+    filters.add(&Filter::new(Id::Standard(4))).unwrap();
+    filters.add(&Filter::new(Id::Standard(5))).unwrap();
 
     // 4x 11bit id filter bank: Matches 8, 9, 10, 11
     let filter_group = filter_groups.next().unwrap();
     assert_eq!(filter_group.num_filters(), 4);
     assert!(!filter_group.extended());
     assert!(filter_group.mask().is_none());
-    filters.add(&Filter::new_standard(8)).unwrap();
-    filters.add(&Filter::new_standard(9)).unwrap();
-    filters.add(&Filter::new_standard(10)).unwrap();
-    filters.add(&Filter::new_standard(11)).unwrap();
+    filters.add(&Filter::new(Id::Standard(8))).unwrap();
+    filters.add(&Filter::new(Id::Standard(9))).unwrap();
+    filters.add(&Filter::new(Id::Standard(10))).unwrap();
+    filters.add(&Filter::new(Id::Standard(11))).unwrap();
 
     // 29bit id + mask for the remaining 11 filter banks
     let filter_group = filter_groups.next().unwrap();
@@ -103,7 +103,7 @@ fn main() -> ! {
 
     // Some messages shall pass the filters.
     for &id in &[0, 1, 2, 4, 5, 8, 9, 10, 11] {
-        let frame_tx = Frame::new_standard(id, &[id as u8]).unwrap();
+        let frame_tx = Frame::new(Id::Standard(id), &[id as u8]).unwrap();
         block!(tx.transmit(&frame_tx)).unwrap();
         let frame_rx = block!(rx.receive()).unwrap();
         assert_eq!(frame_tx, frame_rx);
@@ -111,7 +111,7 @@ fn main() -> ! {
 
     // Others must be filtered out.
     for &id in &[3, 6, 7, 12] {
-        let frame_tx = Frame::new_standard(id, &[id as u8]).unwrap();
+        let frame_tx = Frame::new(Id::Standard(id), &[id as u8]).unwrap();
         block!(tx.transmit(&frame_tx)).unwrap();
         assert!(rx.receive().is_err());
     }
