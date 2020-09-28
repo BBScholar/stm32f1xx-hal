@@ -2,12 +2,15 @@
 //!
 //! The GPIO pins are organised into groups of 16 pins which can be accessed through the
 //! `gpioa`, `gpiob`... modules. To get access to the pins, you first need to convert them into a
-//! HAL designed struct from the `pac` struct using the `spilit` function.
+//! HAL designed struct from the `pac` struct using the [split](trait.GpioExt.html#tymethod.split) function.
 //! ```rust
 //! // Acquire the GPIOC peripheral
 //! // NOTE: `dp` is the device peripherals from the `PAC` crate
 //! let mut gpioa = dp.GPIOA.split(&mut rcc.apb2);
 //! ```
+//!
+//! See the documentation for [rcc::APB2](../rcc/struct.APB2.html) for details about the input parameter to
+//! `split`.
 //!
 //! This gives you a struct containing two control registers `crl` and `crh`, and all the pins
 //! `px0..px15`. These structs are what you use to interract with the pins to change their modes,
@@ -76,6 +79,25 @@ use core::marker::PhantomData;
 use crate::afio;
 use crate::pac::EXTI;
 use crate::rcc::APB2;
+
+/// Slew rates available for Output and relevant AlternateMode Pins
+///
+/// See Table 21 "Output MODE bits" in the reference
+pub enum IOPinSpeed {
+    /// Slew at 10Mhz
+    Mhz10 = 0b01, // (yes, this one is "less" then 2Mhz)
+    /// Slew at 2Mhz
+    Mhz2 = 0b10,
+    /// Slew at 50Mhz
+    Mhz50 = 0b11,
+}
+
+/// Allow setting of the slew rate of an IO pin
+///
+/// Initially all pins are set to the maximum slew rate
+pub trait OutputSpeed<CR> {
+    fn set_speed(&mut self, cr: &mut CR, speed: IOPinSpeed);
+}
 
 /// Extension trait to split a GPIO peripheral in independent pins and registers
 pub trait GpioExt {
@@ -247,6 +269,8 @@ macro_rules! gpio {
                 PinMode,
                 Dynamic,
                 PinModeError,
+                OutputSpeed,
+                IOPinSpeed,
             };
 
             /// GPIO parts
@@ -746,6 +770,26 @@ macro_rules! gpio {
                     #[inline]
                     fn is_set_low(&self) -> Result<bool, Self::Error> {
                         Ok(self._is_set_low())
+                    }
+                }
+
+                impl<MODE> OutputSpeed<$CR> for $PXi<Output<MODE>> {
+                    fn set_speed(&mut self, cr: &mut $CR, speed: IOPinSpeed){
+                        const OFFSET: u32 = (4 * $i) % 32;
+
+                        cr.cr().modify(|r, w| unsafe {
+                            w.bits((r.bits() & !(0b11 << OFFSET)) | ((speed as u32) << OFFSET))
+                        });
+                    }
+                }
+
+                impl OutputSpeed<$CR> for $PXi<Alternate<PushPull>> {
+                    fn set_speed(&mut self, cr: &mut $CR, speed: IOPinSpeed){
+                        const OFFSET: u32 = (4 * $i) % 32;
+
+                        cr.cr().modify(|r, w| unsafe {
+                            w.bits((r.bits() & !(0b11 << OFFSET)) | ((speed as u32) << OFFSET))
+                        });
                     }
                 }
 
