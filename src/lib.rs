@@ -180,7 +180,7 @@ pub mod time;
 pub mod timer;
 #[cfg(all(
     feature = "stm32-usbd",
-    any(feature = "stm32f102", feature = "stm32f103")
+    any(feature = "stm32f102", feature = "stm32f103", feature = "stm32f105")
 ))]
 pub mod usb;
 #[cfg(feature = "device-selected")]
